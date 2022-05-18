@@ -10,22 +10,22 @@ use new::*;
 
 #[derive(Parser)]
 #[clap(name = "napi", bin_name = "napi", version, about, long_about = None)]
-struct Cli {
+enum Cli {
+  New(Box<NewCommandArgs>),
+  Build(Box<BuildCommandArgs>),
+  // simple wrapper for zig linker
   #[clap(subcommand)]
-  command: SubCommand,
+  Zig(cargo_zigbuild::Zig),
 }
 
 #[derive(Subcommand)]
-enum SubCommand {
-  New(Box<NewCommandArgs>),
-  Build(Box<BuildCommandArgs>),
-}
+enum SubCommand {}
 
 macro_rules! run_command {
   ( $src:expr, $( ($branch:ident, $cmd:ty) ),* ) => {
     match $src {
       $(
-        SubCommand::$branch(args) => {
+        Cli::$branch(args) => {
           <$cmd>::try_from(*args)
             .and_then(|mut cmd| cmd.execute())
             .unwrap_or_else(|_| {
@@ -33,6 +33,11 @@ macro_rules! run_command {
             });
         }
       ),*
+      Cli::Zig(zig) => {
+        zig.execute().unwrap_or_else(|_| {
+          std::process::exit(1);
+        });
+      }
       #[allow(unreachable_patterns)]
       _ => unreachable!(),
     }
@@ -46,9 +51,5 @@ pub fn run(args: Vec<String>) {
   if log::set_boxed_logger(Box::new(SimpleLogger)).is_err() {}
   log::set_max_level(log::LevelFilter::Trace);
 
-  run_command!(
-    cli.command,
-    (New, new::NewCommand),
-    (Build, build::BuildCommand)
-  );
+  run_command!(cli, (New, new::NewCommand), (Build, build::BuildCommand));
 }

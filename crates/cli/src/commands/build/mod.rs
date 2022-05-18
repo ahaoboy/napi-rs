@@ -87,7 +87,7 @@ pub struct BuildCommandArgs {
 
   /// [experimental] The suffix of zig ABI version. E.g. `--zig-abi-suffix=2.17`
   #[clap(long)]
-  zip_abi_suffix: Option<String>,
+  zig_abi_suffix: Option<String>,
 
   /// All other flags bypassed to `cargo build` command. Usage: `napi build -- -p sub-crate`
   #[clap(last = true)]
@@ -151,10 +151,12 @@ impl TryFrom<BuildCommandArgs> for BuildCommand {
                 .map(|t| &t.name)
                 .cloned()
             }),
-            target: args
-              .target
-              .clone()
-              .unwrap_or_else(get_system_default_target),
+            target: Target::from(
+              args
+                .target
+                .clone()
+                .unwrap_or_else(get_system_default_target),
+            ),
             intermediate_type_file: get_intermediate_type_file(),
             args,
             package: pkg.clone(),
@@ -180,7 +182,7 @@ pub struct BuildCommand {
   package: Package,
   cdylib_target: Option<String>,
   bin_target: Option<String>,
-  target: String,
+  target: Target,
   intermediate_type_file: PathBuf,
 }
 
@@ -240,7 +242,8 @@ impl BuildCommand {
       .set_target(&mut cmd)
       .set_envs(&mut cmd)
       .set_bypass_args(&mut cmd)
-      .set_package(&mut cmd);
+      .set_package(&mut cmd)
+      .use_zig(&mut cmd);
 
     cmd
   }
@@ -265,7 +268,7 @@ impl BuildCommand {
       Err(_) => String::new(),
     };
 
-    if self.target.contains("musl") && !rust_flags.contains("target-feature=-crt-static") {
+    if self.target.triple.contains("musl") && !rust_flags.contains("target-feature=-crt-static") {
       rust_flags.push_str(" -C target-feature=-crt-static");
     }
 
@@ -287,8 +290,8 @@ impl BuildCommand {
   }
 
   fn set_target(&self, cmd: &mut Command) -> &Self {
-    trace!("set compiling target to {}", &self.target);
-    cmd.arg("--target").arg(&self.target);
+    trace!("set compiling target to {}", &self.target.triple);
+    cmd.arg("--target").arg(&self.target.triple);
 
     self
   }
@@ -364,7 +367,7 @@ impl BuildCommand {
       let mut src = self.target_dir.clone();
       let mut dest = self.output_dir.clone();
 
-      src.push(&self.target);
+      src.push(&self.target.triple);
       src.push(if self.args.release {
         "release"
       } else {
@@ -384,11 +387,9 @@ impl BuildCommand {
   }
 
   fn get_artifact_names(&self) -> Option<(/* src */ String, /* dist */ String)> {
-    let target = Target::from(&self.target);
-
     if let Some(cdylib) = &self.cdylib_target {
       let cdylib = cdylib.clone().replace('-', "_");
-      let src_name = match target.platform {
+      let src_name = match self.target.platform {
         NodePlatform::Darwin => {
           format!("lib{}.dylib", cdylib)
         }
@@ -404,7 +405,7 @@ impl BuildCommand {
         "{}{}.node",
         "index",
         if self.args.platform {
-          format!(".{}", target.platform_arch_abi)
+          format!(".{}", self.target.platform_arch_abi)
         } else {
           "".to_owned()
         }
@@ -412,7 +413,7 @@ impl BuildCommand {
 
       Some((src_name, dest_name))
     } else if let Some(bin) = &self.bin_target {
-      let src_name = if target.platform == NodePlatform::Windows {
+      let src_name = if self.target.platform == NodePlatform::Windows {
         format!("{}.exe", bin)
       } else {
         bin.clone()
@@ -475,6 +476,35 @@ impl BuildCommand {
       .expect("Failed to generate js binding file.");
 
     write_file(&output, &binding).expect("Failed to write js binding file");
+  }
+
+  fn use_zig(&self, cmd: &mut Command) -> &Self {
+    if !self.args.zig {
+      return self;
+    }
+
+    let mut zig_target = self.target.triple.clone();
+    if let Some(suffix) = &self.args.zig_abi_suffix {
+      zig_target.push('.');
+      zig_target.push_str(suffix);
+    }
+
+    let (cc, cxx) =
+      cargo_zigbuild::zig::prepare_zig_linker(&zig_target).expect("Failed to prepare zig linker");
+
+    let linker_env_name = format!(
+      "CARGO_TARGET_{}_LINKER",
+      self.target.triple.to_uppercase().replace('-', "_")
+    );
+
+    let envs = [("CC", &cc), ("CXX", &cxx), (linker_env_name.as_str(), &cc)];
+    trace!("set envs for zig cross compiling");
+    for (name, value) in envs.iter() {
+      trace!("  {}: {}", &name, &value.display());
+      cmd.env(name, value);
+    }
+
+    self
   }
 }
 
